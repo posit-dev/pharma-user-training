@@ -1,0 +1,120 @@
+---
+title: "Safety Summary: Treatment-Emergent Adverse Events"
+subtitle: "Study CDISCPILOT01 | Safety population"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(dplyr)
+library(tidyr)
+library(gt)
+library(ggsurvfit)
+
+arms <- c("Placebo", "Xanomeline Low Dose", "Xanomeline High Dose") # protocol order
+
+# Both files are limited to the safety population; ADAE holds treatment-emergent events only
+adsl <- read.csv("data/ADSL.csv") |>
+  mutate(
+    TRT01A = factor(TRT01A, levels = arms),
+    TRTSDT = as.Date(TRTSDT),
+    TRTEDT = as.Date(TRTEDT),
+    LSTALVDT = as.Date(LSTALVDT)
+  )
+adae <- read.csv("data/ADAE.csv") |>
+  mutate(TRT01A = factor(TRT01A, levels = arms), ASTDT = as.Date(ASTDT))
+
+n_subjects <- nrow(adsl)
+n_with_teae <- n_distinct(adae$USUBJID)
+arm_n <- count(adsl, TRT01A, name = "N")
+```
+
+## Summary
+
+Of **`r n_subjects`** subjects in the safety population, **`r n_with_teae`**
+(`r sprintf("%.1f%%", 100 * n_with_teae / n_subjects)`) reported at least one
+treatment-emergent adverse event (TEAE). Subjects are analysed by the treatment they actually received.
+
+## Most frequent TEAEs
+
+```{r}
+#| label: tbl-teae
+#| tbl-cap: "Subjects with TEAEs by preferred term, n (%)"
+top10 <- adae |>
+  distinct(USUBJID, AEDECOD) |> # a subject counts once per term
+  count(AEDECOD, sort = TRUE) |>
+  slice_head(n = 10) |>
+  pull(AEDECOD)
+
+adae |>
+  filter(AEDECOD %in% top10) |>
+  distinct(USUBJID, TRT01A, AEDECOD) |>
+  count(AEDECOD, TRT01A, name = "n") |>
+  complete(AEDECOD, TRT01A, fill = list(n = 0L)) |>
+  left_join(arm_n, by = "TRT01A") |>
+  mutate(cell = sprintf("%d (%.1f%%)", n, 100 * n / N)) |>
+  select(AEDECOD, TRT01A, cell) |>
+  pivot_wider(names_from = TRT01A, values_from = cell) |>
+  mutate(AEDECOD = factor(AEDECOD, levels = top10)) |>
+  arrange(AEDECOD) |>
+  gt() |>
+  cols_label(AEDECOD = "Preferred term")
+```
+
+## Time to first TEAE
+
+```{r}
+#| label: fig-km
+#| fig-cap: "Kaplan-Meier estimate of time to first TEAE by treatment arm"
+#| fig-height: 6
+first_teae <- adae |>
+  group_by(USUBJID) |>
+  summarise(teae_date = min(ASTDT), .groups = "drop")
+
+tte <- adsl |>
+  left_join(first_teae, by = "USUBJID") |>
+  mutate(
+    event = as.integer(!is.na(teae_date)),
+    end_date = if_else(!is.na(TRTEDT), TRTEDT + 30, LSTALVDT), # censor 30 days after last dose
+    time = pmax(
+      1,
+      as.numeric(if_else(event == 1, teae_date, end_date) - TRTSDT) + 1
+    )
+  )
+
+survfit2(Surv(time, event) ~ TRT01A, data = tte) |>
+  ggsurvfit() +
+  add_confidence_interval() +
+  add_risktable() +
+  labs(x = "Days since first dose", y = "Probability of no TEAE")
+```
+
+## Severe or serious TEAEs
+
+```{r}
+#| label: tbl-listing
+#| tbl-cap: "Listing of severe or serious TEAEs"
+adae |>
+  filter(AESEV == "SEVERE" | AESER == "Y") |>
+  transmute(
+    `Subject ID` = USUBJID,
+    Arm = TRT01A,
+    `Preferred term` = AEDECOD,
+    Onset = ASTDT,
+    Severity = AESEV,
+    Serious = AESER,
+    Relationship = AEREL
+  ) |>
+  arrange(`Subject ID`, Onset) |>
+  gt() |>
+  sub_missing(missing_text = "—") |>
+  tab_options(table.font.size = "small")
+```
